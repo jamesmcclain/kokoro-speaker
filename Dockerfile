@@ -72,6 +72,13 @@ voices = ['af_heart', 'am_santa', 'am_michael', 'am_onyx', 'af_river', 'af_alloy
 [list(pipeline('Hello world', voice=v)) for v in voices]" \
     && chmod -R 777 /tmp/huggingface /tmp/torchinductor
 
+RUN python3 -c "\
+from kokoro import KPipeline; \
+pipeline = KPipeline(lang_code='a'); \
+voices = ['am_adam', 'am_echo']; \
+[list(pipeline('Hello world', voice=v)) for v in voices]" \
+    && chmod -R 777 /tmp/huggingface /tmp/torchinductor
+
 COPY server.py /app/server.py
 
 ENV PULSE_SERVER=unix:/tmp/pulse-socket
