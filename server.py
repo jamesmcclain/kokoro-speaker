@@ -42,7 +42,6 @@ Endpoints:
 
 import io
 import subprocess
-import tempfile
 import threading
 import time
 
@@ -116,13 +115,64 @@ def _update_rtf_estimate(render_seconds, audio_duration_seconds):
         )
 
 
-def _run_pipeline(text, voice, speed):
-    """Synthesizes with Kokoro, measuring wall-clock render time and
-    feeding it into the rolling RTF estimate used for future duration
-    estimates. Returns the concatenated audio array. Raises RuntimeError
-    if synthesis produced no audio."""
+def _open_paplay_stream():
+    """Starts a single long-lived `paplay` process reading raw float32
+    PCM from stdin, so audio chunks can be written to it as Kokoro
+    produces them instead of waiting for the whole utterance to render
+    first. Returns the Popen handle, or None if paplay can't be started
+    (e.g. missing binary), in which case the caller should skip playback
+    entirely rather than fail synthesis."""
+    try:
+        return subprocess.Popen(
+            [
+                "paplay",
+                "--raw",
+                "--format=float32le",
+                f"--rate={SAMPLE_RATE}",
+                "--channels=1",
+            ],
+            stdin=subprocess.PIPE,
+        )
+    except FileNotFoundError as e:
+        app.logger.warning("paplay not available: %s", e)
+        return None
+
+
+def _run_pipeline(text, voice, speed, play):
+    """Synthesizes with Kokoro chunk-by-chunk. If play is True, each
+    chunk is streamed to a live `paplay` process as soon as it's
+    produced, so playback of chunk N starts while chunk N+1 is still
+    being rendered — this is what actually reduces time-to-first-phoneme,
+    as opposed to concatenating everything and playing it only once the
+    entire utterance has been synthesized.
+
+    Measures total wall-clock render time and feeds it into the rolling
+    RTF estimate used for future duration estimates. Returns the
+    concatenated audio array (still needed for return_audio and for the
+    duration measurement). Raises RuntimeError if synthesis produced no
+    audio."""
+    paplay_proc = _open_paplay_stream() if play else None
+
     start = time.time()
-    audio_chunks = [audio for _, _, audio in pipeline(text, voice=voice, speed=speed)]
+    audio_chunks = []
+    try:
+        for _, _, audio in pipeline(text, voice=voice, speed=speed):
+            audio_chunks.append(audio)
+            if paplay_proc is not None:
+                try:
+                    paplay_proc.stdin.write(
+                        np.asarray(audio, dtype=np.float32).tobytes()
+                    )
+                except (BrokenPipeError, OSError) as e:
+                    app.logger.warning("paplay write failed: %s", e)
+                    paplay_proc = None
+    finally:
+        if paplay_proc is not None:
+            try:
+                paplay_proc.stdin.close()
+                paplay_proc.wait()
+            except (BrokenPipeError, OSError) as e:
+                app.logger.warning("paplay close/wait failed: %s", e)
     render_seconds = time.time() - start
 
     if not audio_chunks:
@@ -135,22 +185,15 @@ def _run_pipeline(text, voice, speed):
 
 
 def _synthesize_and_play(text, voice, play, speed):
-    """Runs in a background thread: synthesize with Kokoro, then play via
-    paplay if requested. Any failure here is only logged, since the HTTP
-    response has already been sent."""
+    """Runs in a background thread: synthesize with Kokoro, streaming
+    each chunk to paplay as it's produced if play is requested. Any
+    failure here is only logged, since the HTTP response has already
+    been sent."""
     try:
-        full_audio = _run_pipeline(text, voice, speed)
+        _run_pipeline(text, voice, speed, play)
     except Exception as e:
         app.logger.error("synthesis failed for voice=%s: %s", voice, e)
         return
-
-    if play:
-        with tempfile.NamedTemporaryFile(suffix=".wav") as tmp:
-            sf.write(tmp.name, full_audio, SAMPLE_RATE, format="WAV")
-            try:
-                subprocess.run(["paplay", tmp.name], check=True)
-            except (subprocess.CalledProcessError, FileNotFoundError) as e:
-                app.logger.warning("paplay failed: %s", e)
 
 
 @app.route("/health", methods=["GET"])
@@ -206,18 +249,13 @@ def speak():
         }), 202
 
     # Synchronous legacy path: wait for synthesis, optionally return bytes.
+    # Playback (if requested) is streamed chunk-by-chunk inside
+    # _run_pipeline rather than written to a temp file and played only
+    # after the whole utterance has rendered.
     try:
-        full_audio = _run_pipeline(text, voice, speed)
+        full_audio = _run_pipeline(text, voice, speed, play)
     except RuntimeError:
         return jsonify({"error": "synthesis produced no audio"}), 500
-
-    if play:
-        with tempfile.NamedTemporaryFile(suffix=".wav") as tmp:
-            sf.write(tmp.name, full_audio, SAMPLE_RATE, format="WAV")
-            try:
-                subprocess.run(["paplay", tmp.name], check=True)
-            except (subprocess.CalledProcessError, FileNotFoundError) as e:
-                app.logger.warning("paplay failed: %s", e)
 
     if not return_audio:
         return jsonify({"status": "ok", "played": play}), 200
@@ -228,5 +266,21 @@ def speak():
     return send_file(buf, mimetype="audio/wav", download_name="speech.wav")
 
 
+def _warm_up():
+    """Runs one throwaway synthesis (no playback) before the server
+    starts accepting requests. The Dockerfile already bakes model
+    weights and voice packs into the image at build time, but a fresh
+    container still pays a first-inference tax when the process actually
+    starts (e.g. lazy kernel/thread-pool init). Paying that cost here
+    means the first real /speak request doesn't have to."""
+    try:
+        start = time.time()
+        _run_pipeline("Warming up.", DEFAULT_VOICE, 1.0, play=False)
+        app.logger.info("warm-up synthesis completed in %.2fs", time.time() - start)
+    except Exception as e:
+        app.logger.warning("warm-up synthesis failed (non-fatal): %s", e)
+
+
 if __name__ == "__main__":
+    _warm_up()
     app.run(host="0.0.0.0", port=5001)

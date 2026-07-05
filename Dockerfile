@@ -68,14 +68,7 @@ RUN mkdir -p /tmp/torchinductor /tmp/huggingface && chmod -R 777 /tmp
 RUN python3 -c "\
 from kokoro import KPipeline; \
 pipeline = KPipeline(lang_code='a'); \
-voices = ['af_heart', 'am_santa', 'am_michael', 'am_onyx', 'af_river', 'af_alloy', 'af_nicole']; \
-[list(pipeline('Hello world', voice=v)) for v in voices]" \
-    && chmod -R 777 /tmp/huggingface /tmp/torchinductor
-
-RUN python3 -c "\
-from kokoro import KPipeline; \
-pipeline = KPipeline(lang_code='a'); \
-voices = ['am_adam', 'am_echo']; \
+voices = ['af_heart', 'am_santa', 'am_michael', 'am_onyx', 'af_river', 'af_alloy', 'af_nicole', 'am_adam', 'am_echo']; \
 [list(pipeline('Hello world', voice=v)) for v in voices]" \
     && chmod -R 777 /tmp/huggingface /tmp/torchinductor
 
