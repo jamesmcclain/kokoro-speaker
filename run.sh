@@ -10,13 +10,22 @@
 #   ./run.sh
 #
 # Then, from the host (or anywhere that can reach the host on port 5001):
+#
+# Play through the host's speakers (always asynchronous; fails with 409
+# if the speaker is already in use):
 #   curl -X POST http://localhost:5001/speak \
 #     -H "Content-Type: application/json" \
-#     -d '{"text": "Hello from inside a container.", "voice": "af_heart"}' \
-#     -o output.wav
+#     -d '{"text": "Hello from inside a container.", "voice": "af_heart"}'
 #
-# Audio will play out of the host's speakers immediately (via PulseAudio),
-# and output.wav will also be saved locally for later use.
+# Ask approximately how long until the speaker is free:
+#   curl http://localhost:5001/speaker
+#
+# Download a WAV rendering (always synchronous; never plays through the
+# speaker):
+#   curl -X POST http://localhost:5001/speak \
+#     -H "Content-Type: application/json" \
+#     -d '{"text": "Hello as a file.", "voice": "af_heart", "play": false}' \
+#     -o output.wav
 
 set -euo pipefail
 
@@ -59,8 +68,7 @@ fi
 # echo "Try it from another terminal:"
 # echo "  curl -X POST http://localhost:${HOST_PORT}/speak \\"
 # echo "    -H 'Content-Type: application/json' \\"
-# echo "    -d '{\"text\": \"Hello world\", \"voice\": \"af_heart\"}' \\"
-# echo "    -o output.wav"
+# echo "    -d '{\"text\": \"Hello world\", \"voice\": \"af_heart\"}'"
 # echo
 
 docker run -it --rm \
